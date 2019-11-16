@@ -1,4 +1,4 @@
-﻿using MongoDB.Bson;
+using MongoDB.Bson;
 using MongoDB.Driver;
 
 using System;
@@ -37,18 +37,26 @@ namespace CS488
 
         static async Task gcp_connect()
         {   
-            var client = new MongoClient("mongodb://34.82.135.70:27017"); // Change this with the external IP of your primary instance!    D
+            var client = new MongoClient("mongodb+srv://username:password@server_ip/test?retryWrites=true&w=majority"); // Change this with the external IP of your primary instance!    D
             IMongoDatabase db = client.GetDatabase("airbnb"); // Creates the database if it doesn't already exist
 
             logger.Info("About to query...\n");
-            var collection = db.GetCollection<BsonDocument>("listings_detailed");
-            var src = @"C:/Users/Whyve/Documents/CS488/Dataset/CSV/Listings";
+            // (collection_name, import_folder, import_chunk_size)
+            IList<Tuple<string, string, int>> sources = new List<Tuple<string, string, int>>();
+            sources.Add(Tuple.Create("Listings", @"C:/Users/Whyve/Documents/CS488/Dataset/CSV/Listings", 1000));
+            sources.Add(Tuple.Create("Reviews", @"C:/Users/Whyve/Documents/CS488/Dataset/CSV/Reviews", 25000));
 
-            logger.Info($"Importing documets from '{src}'...");
-            var count = import_folder(src, collection);
-                    
-            logger.Info($"Imported {count.Result.counter} documents from {src}!");
+            IMongoCollection<BsonDocument> collection;
 
+            foreach (Tuple<string, string, int> src in sources)
+            {
+                collection = db.GetCollection<BsonDocument>(src.Item1);
+                logger.Info($"Importing documets from '{src.Item2}'...");
+                var count = import_folder(src.Item2, collection, src.Item3);
+                logger.Info($"Imported {count.Result.counter} documents from {src.Item2}!");
+            }
+
+            collection = db.GetCollection<BsonDocument>(sources[0].Item1);
             Console.WriteLine("Here are all the one-night stays that cost at most $20:");
             Console.WriteLine(new string('-', 50));
             var filter = "{price: {'$lte': 20}, minimum_nights_avg_ntm: 1}"; // Example of how you may query the db
@@ -56,7 +64,7 @@ namespace CS488
                 .ForEachAsync(doc => Console.WriteLine(doc));
         }
 
-        static async Task<IntHolder> import_folder(string src, IMongoCollection<BsonDocument> collection)
+        static async Task<IntHolder> import_folder(string src, IMongoCollection<BsonDocument> collection, int import_chunk_size)
         {
             // Check that src directory exists
             if (!System.IO.Directory.Exists(src))
@@ -80,7 +88,7 @@ namespace CS488
                         count = await import_json(file, collection); // TODO this is a waste of async :/
                         break;
                     case ".csv":
-                        count = await import_csv(file, collection);
+                        count = await import_csv(file, collection, import_chunk_size);
                         break;
                     default:
                         logger.Error($"Unable to import non-json file: {file}");
@@ -112,15 +120,14 @@ namespace CS488
             var document = BsonSerializer.Deserialize<BsonDocument>(data);
             int count = document.ElementCount;
             logger.Debug($"Translated {src} into a BSON document with {count} elements!");
-            //await collection.InsertOneAsync(document);
+            await collection.InsertOneAsync(document);
             logger.Debug($"Finished importing {src} into {collection.CollectionNamespace}");
             return count;
         }
 
-        static async Task<int> import_csv(string src, IMongoCollection<BsonDocument> collection)
+        static async Task<int> import_csv(string src, IMongoCollection<BsonDocument> collection, int import_chunk_size)
         {
             int count = 0;
-            int insert_amt = 1000;
             var documents = new List<BsonDocument>();
 
             using (var fin = new StreamReader(src))
@@ -158,10 +165,10 @@ namespace CS488
                     documents.Add(zipped.ToBsonDocument());
                     ++count;
 
-                    if (count % insert_amt == 0) // Insert documents in batches of insert_amt size
+                    if (count % import_chunk_size == 0) // Insert documents in batches of insert_amt size
                     {
                         await collection.InsertManyAsync(documents); // TODO -> use InsertManyAsync for concurrency?
-                        logger.Debug($"Uploded {insert_amt} records to the database...");
+                        logger.Debug($"Uploded {import_chunk_size} records to {collection.CollectionNamespace.CollectionName}...");
                         documents.Clear();
                     }
                 }
